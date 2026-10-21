@@ -56,6 +56,9 @@
   #del { color: var(--danger); }
   footer { margin-top: 40px; color: var(--muted); font-size: 14px; }
   footer button { color: var(--text); }
+  footer p { margin: 20px 0 0; }
+  footer b { color: var(--text); }
+  footer a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -71,7 +74,13 @@
   <details><summary>✅ Готово <span id="done-n"></span></summary><ul id="done"></ul></details>
 
   <footer>
-    Синхронизация с компьютером: сохрани файл на одном устройстве и загрузи его на другом — идеи объединятся.
+    <b>Синхронизация:</b> <span id="sync-status"></span>
+    <div class="row"><button id="connect"></button></div>
+    <p id="sync-help">
+      Нужен ключ GitHub: <a href="https://github.com/settings/tokens/new?scopes=gist&description=vibe-ideas" target="_blank" rel="noopener">создать ключ</a>
+      (в «Expiration» выбери «No expiration»), скопируй его и нажми кнопку выше. На всех устройствах вставляй один и тот же ключ.
+    </p>
+    <p>Резервная копия в файл (или перенос без интернета):</p>
     <div class="row">
       <button id="export">Сохранить в файл</button>
       <button id="pick">Загрузить из файла</button>
@@ -100,21 +109,29 @@
 
   const $ = id => document.getElementById(id);
   let ideas = JSON.parse(localStorage.getItem('ideas') || '[]');
-  let cur = null;
+  let curId = null;
+  const cur = () => ideas.find(i => i.created === curId);
 
-  function save() {
+  function store() {
     localStorage.setItem('ideas', JSON.stringify(ideas));
     render();
   }
 
+  let timer;
+  function save() {
+    store();
+    clearTimeout(timer);
+    timer = setTimeout(sync, 2000); // отправляем не на каждую букву, а когда пауза
+  }
+
   function render() {
     for (const s of ['work', 'idea', 'done']) {
-      const list = ideas.filter(i => i.status === s);
+      const list = ideas.filter(i => i.status === s && !i.deleted);
       $(s).replaceChildren(...list.map(card));
       $(s + '-n').textContent = list.length;
       $(s).parentElement.hidden = !list.length;
     }
-    $('empty').hidden = ideas.length > 0;
+    $('empty').hidden = ideas.some(i => !i.deleted);
   }
 
   function card(i) {
@@ -130,19 +147,19 @@
   }
 
   function edit(i) {
-    cur = i;
+    curId = i.created;
     $('text').value = i.text;
     mark();
     $('edit').showModal();
   }
 
   function update(changes) {
-    Object.assign(cur, changes, { updated: Date.now() });
+    Object.assign(cur(), changes, { updated: Date.now() });
     save();
   }
 
   function mark() {
-    for (const b of document.querySelectorAll('[data-status]')) b.setAttribute('aria-pressed', b.dataset.status === cur.status);
+    for (const b of document.querySelectorAll('[data-status]')) b.setAttribute('aria-pressed', b.dataset.status === cur().status);
   }
 
   $('add').onsubmit = e => {
@@ -158,22 +175,20 @@
   $('text').oninput = () => update({ text: $('text').value });
   for (const b of document.querySelectorAll('[data-status]')) b.onclick = () => { update({ status: b.dataset.status }); mark(); };
 
-  $('copy').onclick = () => navigator.clipboard.writeText(cur.text).then(() => {
+  $('copy').onclick = () => navigator.clipboard.writeText($('text').value).then(() => {
     $('copy').textContent = 'Скопировано ✓';
     setTimeout(() => $('copy').textContent = 'Копировать', 1500);
   });
 
   $('del').onclick = () => {
     if (!confirm('Удалить идею?')) return;
-    cur.text = '';
+    cur().text = '';
     $('edit').close();
   };
 
   // Идея, оставшаяся пустой после закрытия, удаляется
   $('edit').addEventListener('close', () => {
-    if (cur.text.trim()) return;
-    ideas.splice(ideas.indexOf(cur), 1);
-    save();
+    if (!cur().text.trim()) update({ deleted: true });
   });
 
   $('export').onclick = () => {
@@ -196,7 +211,79 @@
     }
   };
 
+  // Автосинхронизация: идеи лежат в скрытом gist в аккаунте GitHub.
+  // Забрать из облака → объединить со своими → отправить обратно.
+  // shortcut: если два устройства синхронизируются в одну секунду, правка одного дойдёт до облака при его следующей синхронизации.
+  const FILE = 'vibe-ideas.json';
+  let token = localStorage.getItem('token');
+  let gistId = localStorage.getItem('gist');
+  let queue = Promise.resolve();
+
+  function gh(path, method = 'GET', body) {
+    return fetch('https://api.github.com/gists' + path, {
+      method,
+      cache: 'no-store',
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' },
+      body: body && JSON.stringify(body),
+    }).then(r => {
+      if (!r.ok) throw r.status;
+      return r.json();
+    });
+  }
+
+  async function pushPull() {
+    if (!token) return;
+    showSync('идёт…');
+    try {
+      if (!gistId) {
+        const found = (await gh('?per_page=100')).find(g => g.files[FILE]);
+        gistId = found ? found.id : (await gh('', 'POST', { description: 'Идеи для вайб-кодинга', public: false, files: { [FILE]: { content: '[]' } } })).id;
+        localStorage.setItem('gist', gistId);
+      }
+      const gist = await gh('/' + gistId);
+      ideas = merge(ideas, parse(gist.files[FILE].content));
+      store();
+      await gh('/' + gistId, 'PATCH', { files: { [FILE]: { content: JSON.stringify(ideas) } } });
+      showSync('✓ ' + new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }));
+    } catch (e) {
+      if (e === 401) disconnect();
+      if (e === 404) { gistId = null; localStorage.removeItem('gist'); }
+      showSync(e === 401 ? 'ключ не подошёл' : navigator.onLine ? 'ошибка, повторю позже' : 'нет интернета, повторю позже');
+    }
+  }
+
+  const sync = () => (queue = queue.then(pushPull)); // по одной синхронизации за раз
+
+  function showSync(text) {
+    $('sync-status').textContent = text;
+    $('connect').textContent = token ? 'Отключить' : 'Включить автосинхронизацию';
+    $('sync-help').hidden = !!token;
+  }
+
+  function disconnect() {
+    token = gistId = null;
+    localStorage.removeItem('token');
+    localStorage.removeItem('gist');
+  }
+
+  $('connect').onclick = () => {
+    if (token) {
+      if (confirm('Отключить синхронизацию на этом устройстве? Идеи останутся здесь.')) { disconnect(); showSync('выключена'); }
+      return;
+    }
+    const t = prompt('Вставь ключ GitHub:')?.trim();
+    if (!t) return;
+    token = t;
+    localStorage.setItem('token', t);
+    sync();
+  };
+
+  addEventListener('online', sync);
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && sync());
+
   render();
+  showSync(token ? '' : 'выключена');
+  sync();
   navigator.storage?.persist?.(); // просим браузер не чистить данные сам
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 </script>

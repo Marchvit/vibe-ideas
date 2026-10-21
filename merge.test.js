@@ -17,8 +17,14 @@ test('merge: свежая версия побеждает, новые добав
 
 test('parse: выкидывает битые записи, не принимает не-список', () => {
   assert.deepEqual(parse('[{"text":"ok","status":"idea","created":1},{"text":5},null]'), [
-    { text: 'ok', status: 'idea', created: 1, updated: 1 },
+    { text: 'ok', status: 'idea', created: 1, updated: 1, deleted: false },
   ]);
   assert.throws(() => parse('{}'));
   assert.throws(() => parse('not json'));
+});
+
+test('merge: удаление новее правки — идея остаётся удалённой', () => {
+  const mine = [{ text: '', status: 'idea', created: 1, updated: 9, deleted: true }];
+  const theirs = [{ text: 'A', status: 'idea', created: 1, updated: 5, deleted: false }];
+  assert.equal(merge(mine, theirs)[0].deleted, true);
 });

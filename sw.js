@@ -2,9 +2,16 @@
 // а если есть интернет — тихо обновляем копию к следующему запуску
 const FILES = ['./', 'merge.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
-self.addEventListener('install', e => e.waitUntil(caches.open('v1').then(c => c.addAll(FILES))));
+self.addEventListener('install', e => {
+  self.skipWaiting(); // новая версия включается сразу, не дожидаясь закрытия всех окон
+  e.waitUntil(caches.open('v1').then(c => c.addAll(FILES)));
+});
+
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('fetch', e => {
+  // Синхронизация с GitHub идёт мимо кэша, иначе приходили бы старые данные
+  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   const update = fetch(e.request).then(async r => {
     if (r.ok) await caches.open('v1').then(c => c.put(e.request, r.clone()));
     return r;
